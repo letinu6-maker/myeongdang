@@ -65,12 +65,16 @@ def clean_minbak() -> pd.DataFrame:
     df = read_csv_any(path)
     note("도시민박업", "원본 행 수", len(df))
 
-    # 중복 제거 (관리번호 기준)
+    # 중복 제거: 관리번호는 구청마다 따로 매겨져 서울 전체에서 겹치므로
+    # 반드시 구청코드(OPNSFTEAMCODE)와 함께 고유키로 사용한다.
     id_col = pick(df.columns, "MGTNO", "관리번호")
+    org_col = pick(df.columns, "OPNSFTEAMCODE", "개방자치단체코드")
     if id_col:
+        keys = [c for c in (org_col, id_col) if c]
         before = len(df)
-        df = df.drop_duplicates(subset=id_col)
-        note("도시민박업", "중복 제거", before - len(df), f"{id_col} 기준")
+        df = df.drop_duplicates(subset=keys)
+        note("도시민박업", "중복 제거", before - len(df),
+             f"{'+'.join(keys)} 기준 (관리번호만으로는 구청 간 번호가 겹침)")
 
     # 영업 중만 남기기
     st_col = pick(df.columns, "TRDSTATENM", "영업상태명")
@@ -98,18 +102,17 @@ def clean_minbak() -> pd.DataFrame:
         print(f"  매칭 실패 행은 {RAW / 'minbak_unmatched.csv'} 에 저장했습니다.")
     df = df[~fail]
 
-    # 객실 수 (컬럼이 없으면 업소당 1실로 계산하고 기록)
-    room_col = pick(df.columns, "객실", "ROOM")
-    if room_col:
-        df["rooms"] = pd.to_numeric(df[room_col], errors="coerce")
-        miss = int(df["rooms"].isna().sum())
-        note("도시민박업", "객실수 결측", miss, f"{room_col} 컬럼, 결측은 1실로 계산")
-        df["rooms"] = df["rooms"].fillna(1)
-    else:
-        note("도시민박업", "객실수 컬럼 없음", "-", "업소당 1실로 계산")
-        df["rooms"] = 1
+    # 객실 수: 구청마다 입력 여부가 달라 결측이 많으므로 채우지 않고 참고용으로만 집계
+    room_col = pick(df.columns, "STROOMCNT", "객실")
+    df["rooms"] = pd.to_numeric(df[room_col], errors="coerce") if room_col else float("nan")
+    note("도시민박업", "객실수 결측(영업 중)", int(df["rooms"].isna().sum()),
+         "구청별 입력 여부가 달라 채우지 않음. 경쟁 지표는 업소 수 사용")
 
-    g = df.groupby("sgg_code").agg(active_listings=("sgg_code", "size"), active_rooms=("rooms", "sum")).reset_index()
+    g = df.groupby("sgg_code").agg(
+        active_listings=("sgg_code", "size"),
+        rooms_known_listings=("rooms", "count"),
+        rooms_known_sum=("rooms", "sum"),
+    ).reset_index()
     return g
 
 
@@ -164,7 +167,8 @@ def main() -> None:
     no_minbak = int(out["active_listings"].isna().sum())
     note("결합", "생활인구가 없는 자치구", no_pop)
     note("결합", "영업 중 도시민박업이 0곳인 자치구", no_minbak, "0으로 채움")
-    out[["active_listings", "active_rooms"]] = out[["active_listings", "active_rooms"]].fillna(0).astype(int)
+    cnt_cols = ["active_listings", "rooms_known_listings", "rooms_known_sum"]
+    out[cnt_cols] = out[cnt_cols].fillna(0).astype(int)
     out[["night_foreigners", "day_foreigners"]] = out[["night_foreigners", "day_foreigners"]].round(1)
     out["data_as_of"] = f"생활인구 {next((v for s, i, v, h in log if i == '기간'), '?')} / 인허가 수집일 {pd.Timestamp.today():%Y-%m-%d}"
     note("결합", "최종 행 수", len(out), "서울 자치구 25개여야 함")
