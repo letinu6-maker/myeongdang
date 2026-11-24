@@ -48,6 +48,34 @@ def read_csv_any(path: Path) -> pd.DataFrame:
     raise ValueError(f"인코딩을 알 수 없습니다: {path}")
 
 
+def read_population_file(path: Path) -> pd.DataFrame:
+    """단기외국인 생활인구 일별 CSV 읽기.
+    같은 달 파일인데도 형식이 두 가지로 섞여 있다.
+      - 일반형: 쉼표 구분
+      - 혼합형: 머리글은 쉼표, 데이터 줄은 세미콜론 구분 + 행정동코드 뒤 공백 + 끝에 빈 칸
+    줄마다 구분자를 판단해 머리글 개수만큼만 잘라 읽는다."""
+    import csv, io
+    raw = path.read_bytes()
+    for enc in ("utf-8-sig", "cp949", "euc-kr"):
+        try:
+            text = raw.decode(enc)
+            break
+        except UnicodeDecodeError:
+            continue
+    else:
+        raise ValueError(f"인코딩을 알 수 없습니다: {path}")
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    header = [h.strip() for h in next(csv.reader([lines[0]]))]
+    rows = []
+    for ln in lines[1:]:
+        sep = ";" if ";" in ln else ","
+        vals = [v.strip() for v in next(csv.reader(io.StringIO(ln), delimiter=sep))]
+        rows.append((vals + [""] * len(header))[: len(header)])
+    df = pd.DataFrame(rows, columns=header)
+    df["_format"] = "세미콜론" if lines[1:] and ";" in lines[1] else "쉼표"
+    return df
+
+
 def pick(cols, *keywords):
     """컬럼 이름에 키워드가 들어 있는 첫 컬럼을 찾습니다 (대소문자 무시)."""
     for kw in keywords:
@@ -121,14 +149,16 @@ def clean_population() -> pd.DataFrame:
     files = sorted((RAW / "population").glob("*.csv"))
     if not files:
         sys.exit(f"{RAW / 'population'} 에 생활인구 CSV가 없습니다. 월별 zip을 풀어 넣어 주세요.")
-    df = pd.concat([read_csv_any(f) for f in files], ignore_index=True)
-    note("생활인구", "원본 행 수", len(df), f"파일 {len(files)}개")
-    print("생활인구 컬럼:", list(df.columns))
+    parts = [read_population_file(f) for f in files]
+    df = pd.concat(parts, ignore_index=True)
+    n_semi = sum(p["_format"].iat[0] == "세미콜론" for p in parts if len(p))
+    note("생활인구", "원본 행 수", len(df), f"일별 파일 {len(files)}개 (세미콜론 형식 {n_semi}개 포함, 줄별로 구분자 판단)")
+    print("생활인구 컬럼:", [c for c in df.columns if c != "_format"])
 
     dong_col = pick(df.columns, "행정동코드", "ADSTRD")
-    hour_col = pick(df.columns, "시간대", "TMZON")
-    val_col = pick(df.columns, "총생활인구", "TOT_LVPOP", "생활인구")
-    date_col = pick(df.columns, "기준일", "STDR_DE")
+    hour_col = pick(df.columns, "시간대", "TMZON", "시간")
+    val_col = pick(df.columns, "생활인구합계", "총생활인구", "TOT_LVPOP", "생활인구")
+    date_col = pick(df.columns, "기준일", "STDR_DE", "일자")
     if not all([dong_col, hour_col, val_col]):
         sys.exit(f"필요한 컬럼(행정동코드/시간대/생활인구)을 찾지 못했습니다: {list(df.columns)}")
 
